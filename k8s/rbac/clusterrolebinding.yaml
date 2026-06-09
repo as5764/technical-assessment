@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-viewer-binding
+subjects:
+  - kind: ServiceAccount
+    name: dashboard-sa
+    namespace: dashboard
+roleRef:
+  kind: ClusterRole
+  name: dashboard-viewer
+  apiGroup: rbac.authorization.k8s.io
