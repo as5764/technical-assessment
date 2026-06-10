@@ -56,7 +56,7 @@ DASHBOARD_HTML = """
   {% endfor %}
 </table>
 
-<h2>S3 Buckets (tagged env={{ scope }})</h2>
+<h2>S3 Buckets</h2>
 <table>
   <tr><th>Bucket</th><th>Region</th><th>Created</th></tr>
   {% for b in buckets %}
@@ -90,7 +90,7 @@ def resolve_scope(host: str) -> str:
     return label
 
 
-def list_deployments(env: str) -> list:
+def list_deployments() -> list:
     if not _K8S_AVAILABLE:
         return [{"namespace": "mock-ns", "name": "mock-deploy", "desired": 2, "ready": 2, "image": "nginx:latest"}]
 
@@ -99,26 +99,22 @@ def list_deployments(env: str) -> list:
     except k8s_config.ConfigException:
         k8s_config.load_kube_config()
 
-    v1 = k8s_client.CoreV1Api()
     apps_v1 = k8s_client.AppsV1Api()
 
-    namespaces = [ns.metadata.name for ns in v1.list_namespace().items if env in ns.metadata.name]
-
     results = []
-    for ns in namespaces:
-        for d in apps_v1.list_namespaced_deployment(ns).items:
-            image = d.spec.template.spec.containers[0].image if d.spec.template.spec.containers else "unknown"
-            results.append({
-                "namespace": ns,
-                "name": d.metadata.name,
-                "desired": d.spec.replicas or 0,
-                "ready": (d.status.ready_replicas or 0),
-                "image": image,
-            })
+    for d in apps_v1.list_deployment_for_all_namespaces().items:
+        image = d.spec.template.spec.containers[0].image if d.spec.template.spec.containers else "unknown"
+        results.append({
+            "namespace": d.metadata.namespace,
+            "name": d.metadata.name,
+            "desired": d.spec.replicas or 0,
+            "ready": d.status.ready_replicas or 0,
+            "image": image,
+        })
     return results
 
 
-def list_s3_buckets(env: str) -> list:
+def list_s3_buckets() -> list:
     if not _BOTO3_AVAILABLE:
         return [{"name": "mock-bucket", "region": "ap-south-1", "created": "2024-01-01"}]
 
@@ -129,16 +125,8 @@ def list_s3_buckets(env: str) -> list:
     for bucket in all_buckets:
         name = bucket["Name"]
         try:
-            tags = s3.get_bucket_tagging(Bucket=name).get("TagSet", [])
-            env_tag = next((t["Value"] for t in tags if t["Key"] == "env"), None)
-            if env_tag != env:
-                continue
-        except ClientError:
-            continue
-
-        try:
             region = s3.get_bucket_location(Bucket=name).get("LocationConstraint") or "us-east-1"
-        except Exception:
+        except ClientError:
             region = "unknown"
 
         results.append({
@@ -156,24 +144,22 @@ def healthz():
 
 @app.get("/api/deployments")
 def api_deployments():
-    env = resolve_scope(request.host)
-    return jsonify(list_deployments(env))
+    return jsonify(list_deployments())
 
 
 @app.get("/api/buckets")
 def api_buckets():
-    env = resolve_scope(request.host)
-    return jsonify(list_s3_buckets(env))
+    return jsonify(list_s3_buckets())
 
 
 @app.get("/")
 def index():
-    env = resolve_scope(request.host)
+    scope = resolve_scope(request.host)
     return render_template_string(
         DASHBOARD_HTML,
-        scope=env,
-        deployments=list_deployments(env),
-        buckets=list_s3_buckets(env),
+        scope=scope,
+        deployments=list_deployments(),
+        buckets=list_s3_buckets(),
     )
 
 
