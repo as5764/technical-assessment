@@ -21,27 +21,22 @@ except ImportError:
 
 app = Flask(__name__)
 
-DOMAIN_ENV_MAP = {
-    "prod": "production",
-    "staging": "staging",
-}
-
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
-<head><title>Cloud Visibility Dashboard — {{ env }}</title>
+<head><title>Cloud Visibility Dashboard — {{ scope }}</title>
 <style>
   body { font-family: sans-serif; margin: 2rem; }
   h1 { color: #333; }
   table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
   th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
   th { background: #f4f4f4; }
-  .env-badge { background: {{ '#2e7d32' if env == 'production' else '#1565c0' }};
-               color: white; padding: 2px 10px; border-radius: 4px; font-size: 0.85rem; }
+  .scope-badge { background: #37474f; color: white; padding: 2px 10px;
+                 border-radius: 4px; font-size: 0.85rem; }
 </style>
 </head>
 <body>
-<h1>Cloud Visibility Dashboard <span class="env-badge">{{ env }}</span></h1>
+<h1>Cloud Visibility Dashboard <span class="scope-badge">{{ scope }}</span></h1>
 
 <h2>Kubernetes Deployments</h2>
 <table>
@@ -59,7 +54,7 @@ DASHBOARD_HTML = """
   {% endfor %}
 </table>
 
-<h2>S3 Buckets (tagged env={{ env }})</h2>
+<h2>S3 Buckets (tagged env={{ scope }})</h2>
 <table>
   <tr><th>Bucket</th><th>Region</th><th>Created</th></tr>
   {% for b in buckets %}
@@ -77,18 +72,20 @@ DASHBOARD_HTML = """
 """
 
 
-def resolve_environment(host: str) -> str:
-    """Derive the target environment from the HTTP Host header."""
-    host_lower = host.split(":")[0].lower()  # strip port
-    for fragment, env in DOMAIN_ENV_MAP.items():
-        if host_lower.startswith(f"dashboard-{fragment}"):
-            return env
-    # Allow local override for development
+def resolve_scope(host: str) -> str:
+    """
+    Extract the scope from the HTTP Host header.
+    The first subdomain label is used as-is as the scope.
+    e.g.  team-a.example.com  →  scope = "team-a"
+          infra.example.com   →  scope = "infra"
+    A HOST_OVERRIDE env var can be set for local development.
+    """
     override = os.environ.get("HOST_OVERRIDE", "")
-    for fragment, env in DOMAIN_ENV_MAP.items():
-        if override.startswith(f"dashboard-{fragment}"):
-            return env
-    abort(400, description=f"Unknown host: {host}. Expected dashboard-prod.* or dashboard-staging.*")
+    effective_host = override if override else host
+    label = effective_host.split(":")[0].split(".")[0].lower()  # first label, strip port
+    if not label:
+        abort(400, description="Cannot resolve scope: Host header is empty or invalid.")
+    return label
 
 
 def list_deployments(env: str) -> list:
@@ -157,22 +154,22 @@ def healthz():
 
 @app.get("/api/deployments")
 def api_deployments():
-    env = resolve_environment(request.host)
+    env = resolve_scope(request.host)
     return jsonify(list_deployments(env))
 
 
 @app.get("/api/buckets")
 def api_buckets():
-    env = resolve_environment(request.host)
+    env = resolve_scope(request.host)
     return jsonify(list_s3_buckets(env))
 
 
 @app.get("/")
 def index():
-    env = resolve_environment(request.host)
+    env = resolve_scope(request.host)
     return render_template_string(
         DASHBOARD_HTML,
-        env=env,
+        scope=env,
         deployments=list_deployments(env),
         buckets=list_s3_buckets(env),
     )

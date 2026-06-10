@@ -15,7 +15,7 @@ spec:
   #       - dashboard-staging.<YOUR_DOMAIN>
   #     secretName: dashboard-tls
   rules:
-    - host: dashboard-prod.<YOUR_DOMAIN>
+    - host: <SCOPE_A>.<YOUR_DOMAIN>       # replace with your first domain, e.g. team-a.example.com
       http:
         paths:
           - path: /
@@ -25,7 +25,7 @@ spec:
                 name: dashboard-svc
                 port:
                   number: 80
-    - host: dashboard-staging.<YOUR_DOMAIN>
+    - host: <SCOPE_B>.<YOUR_DOMAIN>       # replace with your second domain, e.g. infra.example.com
       http:
         paths:
           - path: /

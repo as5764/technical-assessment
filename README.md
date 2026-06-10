@@ -6,14 +6,17 @@ Build and deploy a **Cloud Visibility Dashboard** — a web application that lis
 1. All Kubernetes **Deployments** across every namespace in a cluster
 2. All **AWS S3 buckets**, grouped by the environment tag that matches the namespace name
 
-The same application must be deployed once but serve **two different outputs** based on the domain used to access it:
+The same application must be deployed once but serve **two different outputs** based on the domain used to access it.
 
-| Domain | Output |
-|--------|--------|
-| `dashboard-prod.<your-domain>` | Shows only `production` namespace deployments + S3 buckets tagged `env=production` |
-| `dashboard-staging.<your-domain>` | Shows only `staging` namespace deployments + S3 buckets tagged `env=staging` |
+The app extracts the **first subdomain label** from the HTTP `Host` header and uses it as the scope — no hardcoded environment names.
 
-The app reads the HTTP `Host` header and scopes its queries accordingly.
+| Domain | Resolved Scope | Output |
+|--------|---------------|--------|
+| `team-a.<your-domain>` | `team-a` | Namespaces containing `team-a` + S3 buckets tagged `env=team-a` |
+| `infra.<your-domain>` | `infra` | Namespaces containing `infra` + S3 buckets tagged `env=infra` |
+| `<anything>.<your-domain>` | `<anything>` | Namespaces + buckets matching that label |
+
+The scope value is used as-is — the candidate defines the two domain names they deploy with.
 
 ---
 
@@ -34,8 +37,8 @@ GitHub Actions CI/CD
 Kubernetes Cluster
     │
     ├── Ingress (2 hosts → 1 Service)
-    │     ├── dashboard-prod.<domain>   ──┐
-    │     └── dashboard-staging.<domain> ─┤
+    │     ├── <scope-a>.<domain>  ──┐
+    │     └── <scope-b>.<domain>  ──┤
     │                                     ▼
     ├── Service → Pod (single Deployment)
     │     └── App reads Host header → scopes query
@@ -60,24 +63,28 @@ Kubernetes Cluster
 | `GET /api/buckets` | JSON list of S3 buckets for the resolved environment |
 | `GET /healthz` | Health check — returns `{ "status": "ok" }` |
 
-### Environment Resolution Logic
+### Scope Resolution Logic
+
+The first subdomain label of the `Host` header is the scope — no mapping, no hardcoding.
 
 ```
-Host: dashboard-prod.*     → environment = "production"
-Host: dashboard-staging.*  → environment = "staging"
-Host: anything else        → HTTP 400 Bad Request
+Host: team-a.example.com   → scope = "team-a"
+Host: infra.example.com    → scope = "infra"
+Host: payments.example.com → scope = "payments"
 ```
+
+The candidate chooses the two domain names they deploy with. Whatever they pick, the app must return different data for each.
 
 ### K8s Deployment Filtering
 
-- List all namespaces; filter those where the namespace **name contains** the resolved environment string  
-  (e.g., environment `production` matches namespaces: `production`, `production-jobs`, `production-infra`)
+- List all namespaces; filter those where the namespace **name contains** the resolved scope string
+  (e.g., scope `team-a` matches namespaces: `team-a`, `team-a-jobs`, `team-a-infra`)
 - Return: namespace, deployment name, desired replicas, ready replicas, image tags, age
 
 ### S3 Bucket Filtering
 
 - List all S3 buckets; for each bucket, call `GetBucketTagging`
-- Return only buckets where tag `env` equals the resolved environment string
+- Return only buckets where tag `env` equals the resolved scope string
 - Return: bucket name, region, creation date, size (optional — bonus)
 
 ---
@@ -248,7 +255,7 @@ metadata:
     kubernetes.io/ingress.class: "nginx"
 spec:
   rules:
-    - host: dashboard-prod.<YOUR_DOMAIN>
+    - host: <SCOPE_A>.<YOUR_DOMAIN>       # e.g. team-a.example.com
       http:
         paths:
           - path: /
@@ -258,7 +265,7 @@ spec:
                 name: dashboard-svc
                 port:
                   number: 80
-    - host: dashboard-staging.<YOUR_DOMAIN>
+    - host: <SCOPE_B>.<YOUR_DOMAIN>       # e.g. infra.example.com
       http:
         paths:
           - path: /
@@ -309,13 +316,14 @@ spec:
 # Run against a local kubeconfig + AWS profile
 export KUBECONFIG=~/.kube/config
 export AWS_PROFILE=your-profile
-export HOST_OVERRIDE=dashboard-prod.localhost  # simulate the Host header
+export HOST_OVERRIDE=team-a.localhost   # simulate any scope — change to test different outputs
 
 # Python example
 pip install -r app/requirements.txt
 python app/main.py
 
 # Visit http://localhost:8080
+# Change HOST_OVERRIDE to a different value to simulate the second domain
 ```
 
 ---
