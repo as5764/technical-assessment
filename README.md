@@ -1,81 +1,169 @@
 # SRE Technical Assessment — Cloud Visibility Dashboard
 
-## Objective
+## What the Application Does
 
-Build and deploy a **Cloud Visibility Dashboard** — a web application that provides infrastructure visibility through two endpoints on a single domain:
+A web application that provides infrastructure visibility through two endpoints on a single domain:
 
-| Endpoint | What it returns |
-|----------|----------------|
+| Endpoint | Returns |
+|----------|---------|
 | `GET /k8s` | All Kubernetes Deployments across every namespace |
 | `GET /s3` | All AWS S3 Buckets in the account |
 | `GET /healthz` | Health check |
 
-The application runs on Kubernetes, authenticates to both the Kubernetes API and AWS without any hardcoded credentials, and is deployed automatically via a CI/CD pipeline.
+The scaffold is provided. Your job is to containerise it, configure the required authentication, write all Kubernetes manifests, and set up the CI/CD pipeline.
+
+---
+
+## How the Application Authenticates
+
+The application uses **no hardcoded credentials anywhere**. It relies on two identity mechanisms that must be configured correctly before it works:
+
+### 1. Kubernetes API — ServiceAccount (In-Cluster Auth)
+
+When the pod runs inside the cluster, the application calls:
+
+```python
+k8s_config.load_incluster_config()
+```
+
+This automatically reads the ServiceAccount token mounted at `/var/run/secrets/kubernetes.io/serviceaccount/token` and uses it to authenticate against the Kubernetes API server.
+
+**What you need to set up:**
+- A dedicated `ServiceAccount` for the application
+- A `ClusterRole` that grants `list` and `get` on `deployments` (across all namespaces)
+- A `ClusterRoleBinding` that binds the ClusterRole to the ServiceAccount
+- The `Deployment` must reference this ServiceAccount via `serviceAccountName`
+
+Without this, the pod will get `403 Forbidden` when calling the Kubernetes API.
+
+---
+
+### 2. AWS S3 — IRSA (IAM Roles for Service Accounts)
+
+When the application calls:
+
+```python
+boto3.client("s3")
+```
+
+The AWS SDK automatically looks for two environment variables that **EKS injects into the pod** when IRSA is configured:
+
+```
+AWS_ROLE_ARN=arn:aws:iam::<account-id>:role/<role-name>
+AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+```
+
+The SDK exchanges the pod's ServiceAccount OIDC token for temporary AWS credentials via STS — **no access keys, no secrets**.
+
+**What you need to set up:**
+
+**Step 1 — Verify the EKS cluster has an OIDC provider**
+```bash
+aws eks describe-cluster --name <cluster-name> --query "cluster.identity.oidc.issuer"
+```
+The output should return an OIDC issuer URL. If not, the OIDC provider needs to be associated with the cluster first.
+
+**Step 2 — Create an IAM role with the following trust policy**
+
+Replace `<oidc-id>`, `<account-id>`, `<namespace>`, and `<service-account-name>` with your values:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<account-id>:oidc-provider/oidc.eks.<region>.amazonaws.com/id/<oidc-id>"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.<region>.amazonaws.com/id/<oidc-id>:sub": "system:serviceaccount:<namespace>:<service-account-name>"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Step 3 — Attach an IAM policy to the role**
+
+The role needs the following minimum permissions:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**Step 4 — Annotate the ServiceAccount with the IAM role ARN**
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: <service-account-name>
+  namespace: <namespace>
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<role-name>
+```
+
+Once the ServiceAccount is annotated and the pod uses it, EKS automatically injects the required environment variables and mounts the OIDC token — the AWS SDK handles the rest.
 
 ---
 
 ## Requirements
 
-### Application
+### Kubernetes Manifests
 
-- The scaffold is provided in `app/` — you may extend it or rewrite it in any language
-- Copy `app/.env.example` to `app/.env` for local development
-- The app must work both locally (using `~/.kube/config` and an AWS profile) and inside the cluster (using a ServiceAccount and an IAM role)
+Write all manifests from scratch:
 
-### Kubernetes
+- `ServiceAccount` — with the IRSA annotation
+- `ClusterRole` — least privilege, only what the app needs
+- `ClusterRoleBinding` — binds the ClusterRole to the ServiceAccount
+- `Deployment` — references the ServiceAccount, sets probes and resource limits
+- `Service` — exposes the application inside the cluster
+- `Ingress` — routes external traffic to the service
 
-- Run as a `Deployment` with at least 2 replicas
-- Expose via a `Service` and an `Ingress` on a domain of your choice
-- The app needs cluster-wide read access to Deployments — set up the right Kubernetes access model
-- Set liveness and readiness probes
-- Set resource requests and limits
+### CI/CD Pipeline
 
-### AWS
-
-- List all S3 Buckets in the account
-- The pod must authenticate to AWS without any access keys in the code or manifests
-- Research how EKS enables pods to assume an IAM role natively
-
-### CI/CD
-
-- Every push to `main` must trigger the pipeline automatically
-- Pipeline must: build the image → push to a registry → deploy to Kubernetes → verify rollout
+- Every push to `main` triggers the pipeline
+- Pipeline builds the Docker image, pushes to a registry, deploys to Kubernetes, and verifies the rollout
 - Image tags must be traceable to a Git commit
+- No static AWS credentials in pipeline secrets — use OIDC federation
 
 ### Security
 
-- Least privilege everywhere — Kubernetes RBAC, IAM policy, and pipeline credentials
-- No hardcoded secrets or credentials anywhere
-
----
-
-## Concepts You Will Need
-
-- Kubernetes ServiceAccounts and RBAC (ClusterRole, ClusterRoleBinding)
-- In-cluster Kubernetes API authentication
-- IRSA — IAM Roles for Service Accounts
-- Kubernetes Ingress
-- GitHub Actions for CI/CD
-- Docker image build and push
+- Least privilege on all RBAC and IAM — nothing more than what the app needs
+- No credentials hardcoded anywhere in code, manifests, or the pipeline
 
 ---
 
 ## Deliverables
 
-Your fork must contain:
-
 ```
-├── app/                    # Application source code + Dockerfile
-├── k8s/                    # All Kubernetes manifests
-│   └── rbac/               # ServiceAccount, ClusterRole, ClusterRoleBinding
-├── .github/workflows/      # CI/CD pipeline
-└── README.md               # Your own setup and verification instructions
+├── Dockerfile
+├── k8s/
+│   ├── serviceaccount.yaml
+│   ├── clusterrole.yaml
+│   ├── clusterrolebinding.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── ingress.yaml
+├── .github/workflows/
+│   └── deploy.yml
+└── README.md              ← your own setup and verification instructions
 ```
-
-Your `README.md` must cover:
-- How to deploy from scratch
-- What needs to be set up in AWS and Kubernetes beforehand
-- How to verify both endpoints work
 
 ---
 
@@ -84,7 +172,7 @@ Your `README.md` must cover:
 1. Fork this repository
 2. Work on a branch named `solution/<your-name>`
 3. Open a Pull Request to `main` on your fork with:
-   - Screenshots of both `/k8s` and `/s3` returning data
+   - Screenshots of `/k8s` and `/s3` returning data
    - A short explanation of your design decisions
 
 **Deadline:** To be communicated by your manager.
