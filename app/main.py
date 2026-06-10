@@ -1,12 +1,16 @@
 """
 Cloud Visibility Dashboard — starter scaffold (Python / Flask).
 Candidates may rewrite this in any language.
+
+Domain A  →  Kubernetes Deployments viewer
+Domain B  →  AWS S3 Buckets viewer
+
+The app reads the Host header to decide which functionality to serve.
+The two domain names are configured in the Ingress and as env vars (DOMAIN_K8S, DOMAIN_S3).
 """
 import os
-import json
 from flask import Flask, jsonify, request, render_template_string, abort
 
-# kubernetes and boto3 are imported lazily so the scaffold runs without them installed
 try:
     from kubernetes import client as k8s_client, config as k8s_config
     _K8S_AVAILABLE = True
@@ -19,28 +23,28 @@ try:
     _BOTO3_AVAILABLE = True
 except ImportError:
     _BOTO3_AVAILABLE = False
-    ClientError = Exception  # fallback so the name is always defined
+    ClientError = Exception
 
 app = Flask(__name__)
 
-DASHBOARD_HTML = """
+# Configured via environment variables — set these in your Deployment manifest
+DOMAIN_K8S = os.environ.get("DOMAIN_K8S", "")  # e.g. k8s.example.com
+DOMAIN_S3  = os.environ.get("DOMAIN_S3", "")   # e.g. s3.example.com
+
+DEPLOYMENTS_HTML = """
 <!DOCTYPE html>
 <html>
-<head><title>Cloud Visibility Dashboard — {{ scope }}</title>
+<head><title>Kubernetes Deployments</title>
 <style>
   body { font-family: sans-serif; margin: 2rem; }
-  h1 { color: #333; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  h1 { color: #1a237e; }
+  table { border-collapse: collapse; width: 100%; }
   th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
-  th { background: #f4f4f4; }
-  .scope-badge { background: #37474f; color: white; padding: 2px 10px;
-                 border-radius: 4px; font-size: 0.85rem; }
+  th { background: #e8eaf6; }
 </style>
 </head>
 <body>
-<h1>Cloud Visibility Dashboard <span class="scope-badge">{{ scope }}</span></h1>
-
-<h2>Kubernetes Deployments</h2>
+<h1>Kubernetes Deployments</h1>
 <table>
   <tr><th>Namespace</th><th>Deployment</th><th>Desired</th><th>Ready</th><th>Image</th></tr>
   {% for d in deployments %}
@@ -55,8 +59,24 @@ DASHBOARD_HTML = """
   <tr><td colspan="5">No deployments found</td></tr>
   {% endfor %}
 </table>
+</body>
+</html>
+"""
 
-<h2>S3 Buckets</h2>
+BUCKETS_HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>S3 Buckets</title>
+<style>
+  body { font-family: sans-serif; margin: 2rem; }
+  h1 { color: #1b5e20; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+  th { background: #e8f5e9; }
+</style>
+</head>
+<body>
+<h1>AWS S3 Buckets</h1>
 <table>
   <tr><th>Bucket</th><th>Region</th><th>Created</th></tr>
   {% for b in buckets %}
@@ -74,20 +94,27 @@ DASHBOARD_HTML = """
 """
 
 
-def resolve_scope(host: str) -> str:
+def resolve_domain(host: str) -> str:
     """
-    Extract the scope from the HTTP Host header.
-    The first subdomain label is used as-is as the scope.
-    e.g.  team-a.example.com  →  scope = "team-a"
-          infra.example.com   →  scope = "infra"
-    A HOST_OVERRIDE env var can be set for local development.
+    Returns 'k8s' or 's3' based on which configured domain matches the Host header.
+    Falls back to DOMAIN_OVERRIDE env var for local testing.
     """
-    override = os.environ.get("HOST_OVERRIDE", "")
-    effective_host = override if override else host
-    label = effective_host.split(":")[0].split(".")[0].lower()  # first label, strip port
-    if not label:
-        abort(400, description="Cannot resolve scope: Host header is empty or invalid.")
-    return label
+    override = os.environ.get("DOMAIN_OVERRIDE", "")
+    effective = override if override else host.split(":")[0].lower()
+
+    if DOMAIN_K8S and effective == DOMAIN_K8S:
+        return "k8s"
+    if DOMAIN_S3 and effective == DOMAIN_S3:
+        return "s3"
+
+    # When env vars are not set (local dev), derive from the first subdomain label
+    label = effective.split(".")[0]
+    if label in ("k8s", "kubernetes"):
+        return "k8s"
+    if label in ("s3", "storage", "aws"):
+        return "s3"
+
+    abort(400, description=f"Unrecognised host '{effective}'. Set DOMAIN_K8S and DOMAIN_S3 env vars.")
 
 
 def list_deployments() -> list:
@@ -100,7 +127,6 @@ def list_deployments() -> list:
         k8s_config.load_kube_config()
 
     apps_v1 = k8s_client.AppsV1Api()
-
     results = []
     for d in apps_v1.list_deployment_for_all_namespaces().items:
         image = d.spec.template.spec.containers[0].image if d.spec.template.spec.containers else "unknown"
@@ -119,16 +145,13 @@ def list_s3_buckets() -> list:
         return [{"name": "mock-bucket", "region": "ap-south-1", "created": "2024-01-01"}]
 
     s3 = boto3.client("s3")
-    all_buckets = s3.list_buckets().get("Buckets", [])
-
     results = []
-    for bucket in all_buckets:
+    for bucket in s3.list_buckets().get("Buckets", []):
         name = bucket["Name"]
         try:
             region = s3.get_bucket_location(Bucket=name).get("LocationConstraint") or "us-east-1"
         except ClientError:
             region = "unknown"
-
         results.append({
             "name": name,
             "region": region,
@@ -137,30 +160,40 @@ def list_s3_buckets() -> list:
     return results
 
 
+# ── Health check ────────────────────────────────────────────────────────────
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"status": "ok"})
 
 
-@app.get("/api/deployments")
+# ── Domain A — Kubernetes Deployments ───────────────────────────────────────
+
+@app.get("/deployments")
 def api_deployments():
+    if resolve_domain(request.host) != "k8s":
+        abort(404)
     return jsonify(list_deployments())
 
 
-@app.get("/api/buckets")
+# ── Domain B — S3 Buckets ────────────────────────────────────────────────────
+
+@app.get("/buckets")
 def api_buckets():
+    if resolve_domain(request.host) != "s3":
+        abort(404)
     return jsonify(list_s3_buckets())
 
 
+# ── Root — renders the right dashboard based on domain ──────────────────────
+
 @app.get("/")
 def index():
-    scope = resolve_scope(request.host)
-    return render_template_string(
-        DASHBOARD_HTML,
-        scope=scope,
-        deployments=list_deployments(),
-        buckets=list_s3_buckets(),
-    )
+    domain = resolve_domain(request.host)
+    if domain == "k8s":
+        return render_template_string(DEPLOYMENTS_HTML, deployments=list_deployments())
+    if domain == "s3":
+        return render_template_string(BUCKETS_HTML, buckets=list_s3_buckets())
 
 
 if __name__ == "__main__":
