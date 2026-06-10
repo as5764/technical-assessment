@@ -2,14 +2,13 @@
 Cloud Visibility Dashboard — starter scaffold (Python / Flask).
 Candidates may rewrite this in any language.
 
-Domain A  →  Kubernetes Deployments viewer
-Domain B  →  AWS S3 Buckets viewer
-
-The app reads the Host header to decide which functionality to serve.
-The two domain names are configured in the Ingress and as env vars (DOMAIN_K8S, DOMAIN_S3).
+Single domain, two endpoints:
+  GET /k8s   → all Kubernetes Deployments across all namespaces
+  GET /s3    → all AWS S3 Buckets in the account
+  GET /healthz → health check
 """
 import os
-from flask import Flask, jsonify, request, render_template_string, abort
+from flask import Flask, jsonify, render_template_string
 
 try:
     from kubernetes import client as k8s_client, config as k8s_config
@@ -27,11 +26,7 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Configured via environment variables — set these in your Deployment manifest
-DOMAIN_K8S = os.environ.get("DOMAIN_K8S", "")  # e.g. k8s.example.com
-DOMAIN_S3  = os.environ.get("DOMAIN_S3", "")   # e.g. s3.example.com
-
-DEPLOYMENTS_HTML = """
+K8S_HTML = """
 <!DOCTYPE html>
 <html>
 <head><title>Kubernetes Deployments</title>
@@ -63,7 +58,7 @@ DEPLOYMENTS_HTML = """
 </html>
 """
 
-BUCKETS_HTML = """
+S3_HTML = """
 <!DOCTYPE html>
 <html>
 <head><title>S3 Buckets</title>
@@ -94,29 +89,6 @@ BUCKETS_HTML = """
 """
 
 
-def resolve_domain(host: str) -> str:
-    """
-    Returns 'k8s' or 's3' based on which configured domain matches the Host header.
-    Falls back to DOMAIN_OVERRIDE env var for local testing.
-    """
-    override = os.environ.get("DOMAIN_OVERRIDE", "")
-    effective = override if override else host.split(":")[0].lower()
-
-    if DOMAIN_K8S and effective == DOMAIN_K8S:
-        return "k8s"
-    if DOMAIN_S3 and effective == DOMAIN_S3:
-        return "s3"
-
-    # When env vars are not set (local dev), derive from the first subdomain label
-    label = effective.split(".")[0]
-    if label in ("k8s", "kubernetes"):
-        return "k8s"
-    if label in ("s3", "storage", "aws"):
-        return "s3"
-
-    abort(400, description=f"Unrecognised host '{effective}'. Set DOMAIN_K8S and DOMAIN_S3 env vars.")
-
-
 def list_deployments() -> list:
     if not _K8S_AVAILABLE:
         return [{"namespace": "mock-ns", "name": "mock-deploy", "desired": 2, "ready": 2, "image": "nginx:latest"}]
@@ -144,7 +116,7 @@ def list_s3_buckets() -> list:
     if not _BOTO3_AVAILABLE:
         return [{"name": "mock-bucket", "region": "ap-south-1", "created": "2024-01-01"}]
 
-    s3 = boto3.client("s3")
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "ap-south-1"))
     results = []
     for bucket in s3.list_buckets().get("Buckets", []):
         name = bucket["Name"]
@@ -160,40 +132,19 @@ def list_s3_buckets() -> list:
     return results
 
 
-# ── Health check ────────────────────────────────────────────────────────────
-
 @app.get("/healthz")
 def healthz():
     return jsonify({"status": "ok"})
 
 
-# ── Domain A — Kubernetes Deployments ───────────────────────────────────────
-
-@app.get("/deployments")
-def api_deployments():
-    if resolve_domain(request.host) != "k8s":
-        abort(404)
-    return jsonify(list_deployments())
+@app.get("/k8s")
+def k8s():
+    return render_template_string(K8S_HTML, deployments=list_deployments())
 
 
-# ── Domain B — S3 Buckets ────────────────────────────────────────────────────
-
-@app.get("/buckets")
-def api_buckets():
-    if resolve_domain(request.host) != "s3":
-        abort(404)
-    return jsonify(list_s3_buckets())
-
-
-# ── Root — renders the right dashboard based on domain ──────────────────────
-
-@app.get("/")
-def index():
-    domain = resolve_domain(request.host)
-    if domain == "k8s":
-        return render_template_string(DEPLOYMENTS_HTML, deployments=list_deployments())
-    if domain == "s3":
-        return render_template_string(BUCKETS_HTML, buckets=list_s3_buckets())
+@app.get("/s3")
+def s3():
+    return render_template_string(S3_HTML, buckets=list_s3_buckets())
 
 
 if __name__ == "__main__":
