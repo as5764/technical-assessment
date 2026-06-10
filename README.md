@@ -55,41 +55,8 @@ AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/to
 
 The SDK exchanges the pod's ServiceAccount OIDC token for temporary AWS credentials via STS — **no access keys, no secrets**.
 
-**What you need to set up:**
+**Required IAM permissions for the role:**
 
-**Step 1 — Verify the EKS cluster has an OIDC provider**
-```bash
-aws eks describe-cluster --name <cluster-name> --query "cluster.identity.oidc.issuer"
-```
-The output should return an OIDC issuer URL. If not, the OIDC provider needs to be associated with the cluster first.
-
-**Step 2 — Create an IAM role with the following trust policy**
-
-Replace `<oidc-id>`, `<account-id>`, `<namespace>`, and `<service-account-name>` with your values:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<account-id>:oidc-provider/oidc.eks.<region>.amazonaws.com/id/<oidc-id>"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "oidc.eks.<region>.amazonaws.com/id/<oidc-id>:sub": "system:serviceaccount:<namespace>:<service-account-name>"
-        }
-      }
-    }
-  ]
-}
-```
-
-**Step 3 — Attach an IAM policy to the role**
-
-The role needs the following minimum permissions:
 ```json
 {
   "Version": "2012-10-17",
@@ -106,19 +73,7 @@ The role needs the following minimum permissions:
 }
 ```
 
-**Step 4 — Annotate the ServiceAccount with the IAM role ARN**
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: <service-account-name>
-  namespace: <namespace>
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<role-name>
-```
-
-Once the ServiceAccount is annotated and the pod uses it, EKS automatically injects the required environment variables and mounts the OIDC token — the AWS SDK handles the rest.
+How the IAM role is created, how it trusts the cluster, and how the pod assumes it — that is for you to figure out.
 
 ---
 
