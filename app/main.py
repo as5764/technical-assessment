@@ -15,9 +15,11 @@ except ImportError:
 
 try:
     import boto3
+    from botocore.exceptions import ClientError
     _BOTO3_AVAILABLE = True
 except ImportError:
     _BOTO3_AVAILABLE = False
+    ClientError = Exception  # fallback so the name is always defined
 
 app = Flask(__name__)
 
@@ -131,7 +133,7 @@ def list_s3_buckets(env: str) -> list:
             env_tag = next((t["Value"] for t in tags if t["Key"] == "env"), None)
             if env_tag != env:
                 continue
-        except s3.exceptions.ClientError:
+        except ClientError:
             continue
 
         try:
